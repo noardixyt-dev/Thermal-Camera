@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
+  <title>Mobile Camera + Thermal-like Reflectance Overlay</title>
+  <style>
+    :root{--bg:#0b0b0d;--accent:#08f}
+    html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    .app{display:flex;flex-direction:column;height:100vh;gap:8px;padding:8px;box-sizing:border-box}
+    #viewer{position:relative;flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:12px;background:#000}
+    video{display:none}
+    canvas{width:100%;height:100%;object-fit:cover}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .control{background:rgba(255,255,255,0.03);padding:8px;border-radius:8px;font-size:14px}
+    label{display:block;font-size:12px;color:#cfcfcf}
+    select,input[type=range]{width:140px}
+    button{padding:8px 12px;border-radius:8px;border:0;background:var(--accent);color:#001}
+    .small{font-size:12px;padding:6px}
+    footer{font-size:12px;color:#aaa;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div id="viewer">
+      <video id="video" autoplay playsinline></video>
+      <canvas id="outputCanvas"></canvas>
+    </div>
+
+    <div class="controls">
+      <div class="control">
+        <label>Camera</label>
+        <select id="facing">
+          <option value="environment">Back (preferred)</option>
+          <option value="user">Front</option>
+        </select>
+      </div>
+
+      <div class="control">
+        <label>Mode</label>
+        <select id="mode">
+          <option value="luminance">Thermal from Luminance</option>
+          <option value="reflectance">Thermal from Reflectance (est.)</option>
+          <option value="none">No overlay (raw)</option>
+        </select>
+      </div>
+
+      <div class="control">
+        <label>Overlay intensity</label>
+        <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.7">
+      </div>
+
+      <div class="control">
+        <label>Smoothing (illum. blur)</label>
+        <input id="blurScale" type="range" min="0.02" max="0.5" step="0.01" value="0.12">
+      </div>
+
+      <div class="control small">
+        <label>Flip / Snapshot</label>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button id="flip" class="small">Flip H</button>
+          <button id="snap" class="small">Snapshot</button>
+        </div>
+      </div>
+
+    </div>
+
+    <footer>Open this page on your mobile device and allow camera. Thermal overlay is an approximation using video brightness/reflectance estimation.</footer>
+  </div>
+
+<script>
+(async function(){
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('outputCanvas');
+  const ctx = canvas.getContext('2d');
+  const facing = document.getElementById('facing');
+  const mode = document.getElementById('mode');
+  const intensity = document.getElementById('intensity');
+  const blurScale = document.getElementById('blurScale');
+  const flipBtn = document.getElementById('flip');
+  const snapBtn = document.getElementById('snap');
+
+  let flipped = false;
+
+  // tiny helper: request camera
+  async function startCamera(){
+    if (window.stream) {
+      window.stream.getTracks().forEach(t=>t.stop());
+    }
+    const constraints = {
+      audio: false,
+      video: {
+        facingMode: { exact: facing.value }
+      }
+    };
+    // attempt exact facing, fallback to ideal
+    try{
+      window.stream = await navigator.mediaDevices.getUserMedia(constraints);
+    }catch(e){
+      window.stream = await navigator.mediaDevices.getUserMedia({video:{facingMode: facing.value}});
+    }
+    video.srcObject = window.stream;
+    await video.play();
+    resizeCanvases();
+  }
+
+  facing.addEventListener('change', ()=> startCamera());
+
+  // snapshot
+  snapBtn.addEventListener('click', ()=>{
+    const link = document.createElement('a');
+    link.download = 'thermal-snapshot.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  });
+
+  flipBtn.addEventListener('click', ()=>{ flipped = !flipped; });
+
+  function resizeCanvases(){
+    const rect = document.getElementById('viewer').getBoundingClientRect();
+    // match canvas pixel size to video resolution to preserve quality
+    const w = video.videoWidth || rect.width*devicePixelRatio;
+    const h = video.videoHeight || rect.height*devicePixelRatio;
+    canvas.width = w;
+    canvas.height = h;
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
+  }
+
+  // small canvas used to compute blurred illumination (cheap blur by downscale)
+  const small = document.createElement('canvas');
+  const sctx = small.getContext('2d');
+
+  function mapToThermal(v){
+    // v expected 0..1 -> returns [r,g,b]
+    // simple multi-stop colormap (blue->cyan->yellow->red->white)
+    const stops = [
+      {t:0.0,c:[0,0,80]},
+      {t:0.25,c:[0,100,200]},
+      {t:0.5,c:[200,200,0]},
+      {t:0.75,c:[230,80,0]},
+      {t:1.0,c:[255,255,255]}
+    ];
+    v = Math.max(0,Math.min(1,v));
+    for(let i=0;i<stops.length-1;i++){
+      const a = stops[i], b=stops[i+1];
+      if(v>=a.t && v<=b.t){
+        const f = (v-a.t)/(b.t-a.t);
+        const r = Math.round(a.c[0] + (b.c[0]-a.c[0])*f);
+        const g = Math.round(a.c[1] + (b.c[1]-a.c[1])*f);
+        const bl = Math.round(a.c[2] + (b.c[2]-a.c[2])*f);
+        return [r,g,bl];
+      }
+    }
+    return [255,255,255];
+  }
+
+  function computeFrame(){
+    if (video.readyState < 2) { requestAnimationFrame(computeFrame); return; }
+    // ensure canvas sizes
+    if(canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) resizeCanvases();
+
+    // draw video to main canvas
+    ctx.save();
+    if(flipped){ ctx.translate(canvas.width,0); ctx.scale(-1,1); }
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    ctx.restore();
+
+    const frame = ctx.getImageData(0,0,canvas.width,canvas.height);
+    const data = frame.data;
+
+    // compute luminance array
+    const w = canvas.width, h = canvas.height;
+    const lum = new Float32Array(w*h);
+    let sum = 0;
+    for(let i=0, j=0;i<data.length;i+=4,j++){
+      const r = data[i], g = data[i+1], b = data[i+2];
+      const L = 0.2126*r + 0.7152*g + 0.0722*b; // 0..255
+      lum[j] = L;
+      sum += L;
+    }
+    const meanLum = sum / (w*h) + 1e-6;
+
+    // compute blurred illumination by drawing luminance to small canvas and upscaling
+    const scale = Math.max(1, Math.floor(1/parseFloat(blurScale.value))); // smaller => more blur
+    small.width = Math.max(4, Math.floor(w/scale));
+    small.height = Math.max(4, Math.floor(h/scale));
+    // paint luminance into small canvas
+    const smallImg = sctx.createImageData(small.width, small.height);
+    const sd = smallImg.data;
+    // fill small canvas by sampling from lum (box sample)
+    for(let y=0;y<small.height;y++){
+      for(let x=0;x<small.width;x++){
+        const sx = Math.floor(x * w / small.width);
+        const sy = Math.floor(y * h / small.height);
+        const v = Math.round(lum[sy*w + sx]);
+        const idx = (y*small.width + x)*4;
+        sd[idx]=sd[idx+1]=sd[idx+2]=v;
+        sd[idx+3]=255;
+      }
+    }
+    sctx.putImageData(smallImg,0,0);
+    // upscale back to full size (this produces a cheap blur)
+    const illumCanvas = document.createElement('canvas');
+    illumCanvas.width = w; illumCanvas.height = h; const ictx = illumCanvas.getContext('2d');
+    ictx.imageSmoothingEnabled = true;
+    ictx.drawImage(small,0,0,small.width,small.height,0,0,w,h);
+    const illumData = ictx.getImageData(0,0,w,h).data;
+
+    // compute reflectance estimate = luminance / illumination
+    const reflect = new Float32Array(w*h);
+    for(let i=0,j=0;i<data.length;i+=4,j++){
+      const I = illumData[i]; // since illum RGB equal
+      const R = lum[j] / (I + 1e-3*255); // normalized ~ around 0..few
+      reflect[j] = R;
+    }
+
+    // find min/max for normalization
+    let minV=1e9, maxV=-1e9;
+    for(let i=0;i<w*h;i++){
+      let v = mode.value === 'reflectance' ? reflect[i] : lum[i] / 255;
+      if(v<minV) minV=v; if(v>maxV) maxV=v;
+    }
+    const denom = (maxV - minV) || 1;
+
+    // overlay thermal map onto frame data
+    const overlayIntensity = parseFloat(intensity.value);
+    for(let i=0,j=0;i<data.length;i+=4,j++){
+      if(mode.value === 'none') break;
+      let v = mode.value === 'reflectance' ? reflect[j] : (lum[j]/255);
+      // normalize
+      v = (v - minV) / denom;
+      // optional gamma to tweak contrast
+      v = Math.pow(v, 0.8);
+      const [tr,tg,tb] = mapToThermal(v);
+      // blend: overlay color blended with original
+      data[i] = Math.round(data[i] * (1-overlayIntensity) + tr * overlayIntensity);
+      data[i+1] = Math.round(data[i+1] * (1-overlayIntensity) + tg * overlayIntensity);
+      data[i+2] = Math.round(data[i+2] * (1-overlayIntensity) + tb * overlayIntensity);
+    }
+
+    ctx.putImageData(frame,0,0);
+    requestAnimationFrame(computeFrame);
+  }
+
+  // start
+  try{
+    await startCamera();
+    requestAnimationFrame(computeFrame);
+  }catch(err){
+    alert('Camera error: '+err.message);
+    console.error(err);
+  }
+
+  // handle orientation/resizes
+  window.addEventListener('resize', resizeCanvases);
+
+})();
+</script>
+</body>
+</html>
+
