@@ -73,12 +73,47 @@
   };
   flipBtn.onclick=()=> flipped=!flipped;
 
-  function thermalColor(v){
+  function function thermalColor(v){
+    // Realistic FLIR-style 9‑point gradient
+    const stops=[
+      {t:0.00,c:[0,0,0]},       // black
+      {t:0.15,c:[0,0,80]},      // deep blue
+      {t:0.30,c:[0,60,200]},    // blue
+      {t:0.45,c:[0,200,255]},   // cyan
+      {t:0.60,c:[0,255,120]},   // green-yellow
+      {t:0.72,c:[255,255,0]},   // yellow
+      {t:0.85,c:[255,120,0]},   // orange
+      {t:0.95,c:[255,40,0]},    // deep orange-red
+      {t:1.00,c:[255,255,255]}  // white hot
+    ];
+    v=Math.max(0,Math.min(1,v));
+    for(let i=0;i<stops.length-1;i++){
+      const a=stops[i], b=stops[i+1];
+      if(v>=a.t && v<=b.t){
+        const f=(v-a.t)/(b.t-a.t);
+        return [
+          a.c[0]+(b.c[0]-a.c[0])*f,
+          a.c[1]+(b.c[1]-a.c[1])*f,
+          a.c[2]+(b.c[2]-a.c[2])*f
+        ];
+      }
+    }
+    return [255,255,255];
+  }(v){
     const a=[0,0,100],b=[255,80,0];
     return [a[0]+(b[0]-a[0])*v,a[1]+(b[1]-a[1])*v,a[2]+(b[2]-a[2])*v];
   }
 
-  function loop(){
+  function // IR-enhanced pseudo-thermal blend
+  function extractIR(r,g,b){
+    // Most phone sensors leak a tiny bit of NIR into the RED channel.
+    // We approximate IR as:
+    //   IR = max(0, r - (g*0.55) - (b*0.25))
+    // This isolates wavelengths > ~700nm loosely.
+    return Math.max(0, r - g*0.55 - b*0.25) / 255;
+  }
+
+  function loop()(){
     if(video.readyState>=2){
       resize();
       ctx.save();
@@ -90,8 +125,13 @@
         const frame=ctx.getImageData(0,0,canvas.width,canvas.height);
         const d=frame.data;    
         for(let i=0;i<d.length;i+=4){
+          // base luminance
           const l=(d[i]*0.2126+d[i+1]*0.7152+d[i+2]*0.0722)/255;
-          const [r,g,b]=thermalColor(l);
+          // IR estimated from leaked NIR sensitivity
+          const ir=extractIR(d[i],d[i+1],d[i+2]);
+          // Mix IR and luminance → stronger IR response
+          const thermalInput = Math.min(1, l*0.5 + ir*1.5);(d[i]*0.2126+d[i+1]*0.7152+d[i+2]*0.0722)/255;
+          const [r,g,b]=thermalColor(thermalInput);
           const a=parseFloat(intensity.value);
           d[i]=d[i]*(1-a)+r*a;
           d[i+1]=d[i+1]*(1-a)+g*a;
