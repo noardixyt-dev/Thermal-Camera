@@ -1,151 +1,487 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover" />
-  <title>Mobile Camera + Thermal Overlay (GitHub Pages Safe)</title>
-  <style>
-    html,body{margin:0;height:100%;background:#000;color:#fff;font-family:system-ui}
-    #wrap{position:fixed;inset:0;display:flex;flex-direction:column;padding:8px;gap:8px}
-    #viewer{flex:1;position:relative;overflow:hidden;border-radius:12px;background:#111}
-    video{display:none}
-    canvas{width:100%;height:100%;object-fit:cover}
-    select,input,button{font-size:14px;padding:6px;border-radius:6px;border:0}
-    button{background:#0af;color:#000}
-    .controls{display:flex;flex-wrap:wrap;gap:8px}
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Neon VR Runner</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+            touch-action: none; /* Prevent pull-to-refresh on mobile */
+            user-select: none;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100vh;
+            display: block;
+        }
+
+        /* UI Overlay for Start Screen */
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 999;
+            color: #0ff;
+            text-align: center;
+            transition: opacity 0.5s;
+        }
+
+        h1 {
+            font-size: 2rem;
+            text-shadow: 0 0 10px #0ff;
+            margin-bottom: 10px;
+        }
+
+        p {
+            color: #fff;
+            max-width: 80%;
+            margin-bottom: 30px;
+            font-size: 1rem;
+            line-height: 1.5;
+        }
+
+        button {
+            background: transparent;
+            color: #0ff;
+            border: 2px solid #0ff;
+            padding: 15px 40px;
+            font-size: 1.2rem;
+            font-family: inherit;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            box-shadow: 0 0 15px #0ff;
+            border-radius: 5px;
+            transition: all 0.2s;
+        }
+
+        button:hover {
+            background: #0ff;
+            color: #000;
+        }
+
+        /* Center line for alignment in Cardboard */
+        .separator {
+            position: absolute;
+            left: 50%;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateX(-50%);
+            z-index: 10;
+            pointer-events: none;
+        }
+
+        /* Score display */
+        #score-display {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-size: 24px;
+            text-shadow: 0 0 5px #fff;
+            z-index: 20;
+            display: none;
+            font-weight: bold;
+        }
+
+        /* Red flash when hitting an obstacle */
+        #damage-flash {
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            background: red; 
+            opacity: 0; 
+            pointer-events: none; 
+            z-index: 50;
+            transition: opacity 0.2s;
+        }
+
+    </style>
+
+    <!-- Import Map for Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
 </head>
 <body>
-<div id="wrap">
-  <div id="viewer">
-    <video id="video" autoplay playsinline></video>
-    <canvas id="canvas"></canvas>
-  </div>
 
-  <div class="controls">
-    <select id="mode">
-      <option value="luminance">Thermal from Luminance</option>
-      <option value="none">No Overlay</option>
-    </select>
-    <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.7">
-    <button id="flip">Flip</button>
-    <button id="snap">Snapshot</button>
-  </div>
-</div>
+    <div id="overlay">
+        <h1>NEON VR RUNNER</h1>
+        <p>
+            <b>INSTRUCTIONS:</b><br>
+            1. Disable screen rotation lock.<br>
+            2. Tap "ENTER VR".<br>
+            3. Insert phone into viewer.<br>
+            4. Look around to fly.
+        </p>
+        <button id="start-btn">ENTER VR</button>
+    </div>
 
-<script>
-(async()=>{
-  const video=document.querySelector('#video');
-  const canvas=document.querySelector('#canvas');
-  const ctx=canvas.getContext('2d');
-  const mode=document.querySelector('#mode');
-  const intensity=document.querySelector('#intensity');
-  const flipBtn=document.querySelector('#flip');
-  const snapBtn=document.querySelector('#snap');
-  let flipped=false;
+    <div id="score-display">SCORE: 0</div>
+    <div id="canvas-container"></div>
+    <div class="separator" id="separator" style="display:none;"></div>
+    <div id="damage-flash"></div>
 
-  function resize(){
-    if(video.videoWidth){
-      canvas.width=video.videoWidth;
-      canvas.height=video.videoHeight;
-    }
-  }
-  window.addEventListener('resize',resize);
+    <script type="module">
+        import * as THREE from 'three';
+        import { DeviceOrientationControls } from 'three/addons/controls/DeviceOrientationControls.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-  // GitHub Pages SAFE camera request
-  async function startCamera(){
-    const constraints={ video:{ facingMode:"environment" } };
-    try{
-      const stream=await navigator.mediaDevices.getUserMedia(constraints);
-      video.srcObject=stream;
-      await video.play();
-      resize();
-    }catch(e){
-      alert("Camera error: "+e.message);
-    }
-  }
+        // --- GLOBAL VARIABLES ---
+        let camera, scene, renderer;
+        let stereoCamera;
+        let controls;
+        let isPlaying = false;
+        
+        // Game Objects
+        const obstacles = [];
+        const collectibles = [];
+        let playerContainer; // Holds the camera and moves through the world
+        let tunnelGroup; // Holds the grid visuals
+        
+        // Game State
+        let speed = 0.4;
+        let score = 0;
+        let clock = new THREE.Clock();
+        
+        // DOM Elements
+        const startBtn = document.getElementById('start-btn');
+        const overlay = document.getElementById('overlay');
+        const separator = document.getElementById('separator');
+        const scoreDisplay = document.getElementById('score-display');
+        const damageFlash = document.getElementById('damage-flash');
 
-  snapBtn.onclick=()=>{
-    const a=document.createElement('a');
-    a.download='thermal.png';
-    a.href=canvas.toDataURL();
-    a.click();
-  };
-  flipBtn.onclick=()=> flipped=!flipped;
+        // --- INITIALIZATION ---
 
-  function function thermalColor(v){
-    // Realistic FLIR-style 9‑point gradient
-    const stops=[
-      {t:0.00,c:[0,0,0]},       // black
-      {t:0.15,c:[0,0,80]},      // deep blue
-      {t:0.30,c:[0,60,200]},    // blue
-      {t:0.45,c:[0,200,255]},   // cyan
-      {t:0.60,c:[0,255,120]},   // green-yellow
-      {t:0.72,c:[255,255,0]},   // yellow
-      {t:0.85,c:[255,120,0]},   // orange
-      {t:0.95,c:[255,40,0]},    // deep orange-red
-      {t:1.00,c:[255,255,255]}  // white hot
-    ];
-    v=Math.max(0,Math.min(1,v));
-    for(let i=0;i<stops.length-1;i++){
-      const a=stops[i], b=stops[i+1];
-      if(v>=a.t && v<=b.t){
-        const f=(v-a.t)/(b.t-a.t);
-        return [
-          a.c[0]+(b.c[0]-a.c[0])*f,
-          a.c[1]+(b.c[1]-a.c[1])*f,
-          a.c[2]+(b.c[2]-a.c[2])*f
-        ];
-      }
-    }
-    return [255,255,255];
-  }(v){
-    const a=[0,0,100],b=[255,80,0];
-    return [a[0]+(b[0]-a[0])*v,a[1]+(b[1]-a[1])*v,a[2]+(b[2]-a[2])*v];
-  }
+        function init() {
+            // 1. Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x050011);
+            scene.fog = new THREE.FogExp2(0x050011, 0.025);
 
-  function // IR-enhanced pseudo-thermal blend
-  function extractIR(r,g,b){
-    // Most phone sensors leak a tiny bit of NIR into the RED channel.
-    // We approximate IR as:
-    //   IR = max(0, r - (g*0.55) - (b*0.25))
-    // This isolates wavelengths > ~700nm loosely.
-    return Math.max(0, r - g*0.55 - b*0.25) / 255;
-  }
+            // 2. Camera Setup
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
+            
+            // We use a container to move the player, so the camera rotation (looking around) 
+            // is independent of the movement direction (flying forward)
+            playerContainer = new THREE.Group();
+            scene.add(playerContainer);
+            playerContainer.add(camera);
 
-  function loop()(){
-    if(video.readyState>=2){
-      resize();
-      ctx.save();
-      if(flipped){ctx.translate(canvas.width,0);ctx.scale(-1,1);}    
-      ctx.drawImage(video,0,0,canvas.width,canvas.height);
-      ctx.restore();
+            // Stereo Camera setup for VR split screen
+            stereoCamera = new THREE.StereoCamera();
+            stereoCamera.aspect = 0.5; // Half width for each eye
+            stereoCamera.eyeSep = 0.064; // Standard IPD (Interpupillary distance)
 
-      if(mode.value!=='none'){
-        const frame=ctx.getImageData(0,0,canvas.width,canvas.height);
-        const d=frame.data;    
-        for(let i=0;i<d.length;i+=4){
-          // base luminance
-          const l=(d[i]*0.2126+d[i+1]*0.7152+d[i+2]*0.0722)/255;
-          // IR estimated from leaked NIR sensitivity
-          const ir=extractIR(d[i],d[i+1],d[i+2]);
-          // Mix IR and luminance → stronger IR response
-          const thermalInput = Math.min(1, l*0.5 + ir*1.5);(d[i]*0.2126+d[i+1]*0.7152+d[i+2]*0.0722)/255;
-          const [r,g,b]=thermalColor(thermalInput);
-          const a=parseFloat(intensity.value);
-          d[i]=d[i]*(1-a)+r*a;
-          d[i+1]=d[i+1]*(1-a)+g*a;
-          d[i+2]=d[i+2]*(1-a)+b*a;
+            // 3. Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setScissorTest(true); // Essential for split screen
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // 4. Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+            
+            // Sun-like light ahead
+            const dirLight = new THREE.DirectionalLight(0xff00ff, 2);
+            dirLight.position.set(0, 20, -50);
+            scene.add(dirLight);
+
+            // 5. Build World
+            createTunnel();
+            createReticle(); // A helper ring to see where you are looking
+
+            // 6. Event Listeners
+            window.addEventListener('resize', onWindowResize);
+            startBtn.addEventListener('click', requestVRAccess);
         }
-        ctx.putImageData(frame,0,0);
-      }
-    }
-    requestAnimationFrame(loop);
-  }
 
-  await startCamera();
-  loop();
-})();
-</script>
+        // --- WORLD GENERATION ---
+
+        function createTunnel() {
+            tunnelGroup = new THREE.Group();
+            
+            // Floor Grid
+            // Size 400, 80 divisions
+            const gridHelper = new THREE.GridHelper(400, 80, 0xff00ff, 0x220044);
+            gridHelper.position.y = -10;
+            tunnelGroup.add(gridHelper);
+            
+            // Ceiling Grid (mirrored)
+            const gridHelperTop = new THREE.GridHelper(400, 80, 0x00ffff, 0x004444);
+            gridHelperTop.position.y = 10;
+            tunnelGroup.add(gridHelperTop);
+
+            scene.add(tunnelGroup);
+        }
+
+        function createReticle() {
+            // Simple ring locked to camera view
+            const geometry = new THREE.RingGeometry(0.03, 0.05, 32);
+            const material = new THREE.MeshBasicMaterial({ 
+                color: 0xffffff, 
+                opacity: 0.5, 
+                transparent: true, 
+                depthTest: false 
+            });
+            const reticle = new THREE.Mesh(geometry, material);
+            reticle.position.z = -2; // In front of camera
+            camera.add(reticle);
+        }
+
+        function spawnObstacle() {
+            // Deadly Red Cube
+            const geometry = new THREE.BoxGeometry(3, 3, 3);
+            const material = new THREE.MeshPhongMaterial({ 
+                color: 0xff0000, 
+                emissive: 0x440000,
+                shininess: 50 
+            });
+            const obstacle = new THREE.Mesh(geometry, material);
+            
+            const spawnDistance = 150;
+            const spread = 40; // How wide the tunnel feels
+            
+            // Random position ahead
+            obstacle.position.x = playerContainer.position.x + (Math.random() - 0.5) * spread;
+            obstacle.position.y = (Math.random() - 0.5) * (spread * 0.6);
+            obstacle.position.z = playerContainer.position.z - spawnDistance;
+            
+            // Random rotation speed stored in userData
+            obstacle.userData = { 
+                rotSpeed: { x: Math.random()*2, y: Math.random()*2 } 
+            };
+
+            scene.add(obstacle);
+            obstacles.push(obstacle);
+        }
+
+        function spawnCollectible() {
+            // Points Blue Orb
+            const geometry = new THREE.IcosahedronGeometry(1.5, 0);
+            const material = new THREE.MeshPhongMaterial({ 
+                color: 0x00ffff, 
+                emissive: 0x004444,
+                shininess: 100
+            });
+            const orb = new THREE.Mesh(geometry, material);
+            
+            const spawnDistance = 150;
+            const spread = 30;
+            
+            orb.position.x = playerContainer.position.x + (Math.random() - 0.5) * spread;
+            orb.position.y = (Math.random() - 0.5) * (spread * 0.6);
+            orb.position.z = playerContainer.position.z - spawnDistance;
+
+            scene.add(orb);
+            collectibles.push(orb);
+        }
+
+        // --- CONTROL SETUP ---
+
+        async function requestVRAccess() {
+            // iOS 13+ requires permission for DeviceOrientation
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try {
+                    const permissionState = await DeviceOrientationEvent.requestPermission();
+                    if (permissionState === 'granted') {
+                        setupGame(true);
+                    } else {
+                        alert("Gyroscope permission denied. Touch to look around.");
+                        setupGame(false);
+                    }
+                } catch (error) {
+                    console.error(error);
+                    setupGame(false);
+                }
+            } else {
+                // Android or Desktop
+                setupGame(true);
+            }
+        }
+
+        function setupGame(useGyro) {
+            // If device supports orientation events, use them. Otherwise fallback to mouse drag.
+            if (useGyro && window.DeviceOrientationEvent) {
+                controls = new DeviceOrientationControls(camera);
+            } else {
+                controls = new OrbitControls(camera, renderer.domElement);
+                controls.enableZoom = false;
+                controls.enablePan = false;
+                controls.rotateSpeed = -0.5; // Invert mouse for "flight" feel
+                controls.target.set(0, 0, -1);
+            }
+
+            // Hide overlay
+            overlay.style.opacity = 0;
+            setTimeout(() => overlay.style.display = 'none', 500);
+            
+            // Show game UI
+            separator.style.display = 'block';
+            scoreDisplay.style.display = 'block';
+            
+            // Attempt fullscreen
+            try {
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen();
+                }
+            } catch(e) { console.log("Fullscreen denied"); }
+
+            isPlaying = true;
+            animate();
+        }
+
+        // --- GAME LOOP ---
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (!isPlaying) return;
+
+            const delta = clock.getDelta();
+
+            // 1. Update Camera Rotation (Head tracking)
+            if (controls) controls.update();
+
+            // 2. Fly Forward
+            playerContainer.position.z -= speed;
+            
+            // Increase difficulty slowly
+            speed += 0.00005;
+
+            // 3. Infinite Grid Effect
+            // Snap the tunnel to the player's Z position (modulo grid size)
+            // to make it look like an endless tunnel without creating infinite geometry
+            if (tunnelGroup) {
+                const gridSize = 20;
+                const snapZ = Math.floor(playerContainer.position.z / gridSize) * gridSize;
+                tunnelGroup.position.z = snapZ;
+                // We don't snap X/Y because we want to see the walls move relative to us
+                tunnelGroup.position.x = 0; 
+            }
+
+            // 4. Flight Steering
+            // We move the player container based on where the camera is looking
+            const lookDir = new THREE.Vector3();
+            camera.getWorldDirection(lookDir);
+            
+            // Steer left/right/up/down based on gaze
+            // Multiplier determines handling sensitivity
+            const steerSensitivity = 0.8;
+            playerContainer.position.x += lookDir.x * steerSensitivity;
+            playerContainer.position.y += lookDir.y * steerSensitivity;
+
+            // 5. Manage Objects (Spawn & Cleanup)
+            if (Math.random() < 0.04) spawnObstacle();
+            if (Math.random() < 0.03) spawnCollectible();
+
+            processEntities(obstacles, 'obstacle');
+            processEntities(collectibles, 'collectible');
+
+            // 6. Render Stereo
+            renderStereo();
+        }
+
+        function processEntities(array, type) {
+            for (let i = array.length - 1; i >= 0; i--) {
+                const obj = array[i];
+                
+                // Rotate visuals
+                if (obj.userData.rotSpeed) {
+                    obj.rotation.x += obj.userData.rotSpeed.x * 0.02;
+                    obj.rotation.y += obj.userData.rotSpeed.y * 0.02;
+                }
+
+                // Despawn if behind player
+                if (obj.position.z > playerContainer.position.z + 20) {
+                    scene.remove(obj);
+                    array.splice(i, 1);
+                    continue;
+                }
+
+                // Collision Check
+                const dist = obj.position.distanceTo(playerContainer.position);
+                const hitRadius = 3.0; // Slightly generous hitbox
+
+                if (dist < hitRadius) {
+                    if (type === 'obstacle') {
+                        triggerDamage();
+                        scene.remove(obj);
+                        array.splice(i, 1);
+                    } else if (type === 'collectible') {
+                        score += 100;
+                        scoreDisplay.innerText = `SCORE: ${score}`;
+                        scene.remove(obj);
+                        array.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        function triggerDamage() {
+            // Flash screen red
+            damageFlash.style.opacity = 0.6;
+            setTimeout(() => damageFlash.style.opacity = 0, 200);
+            
+            // Penalty: Slow down and lose points
+            speed = Math.max(0.2, speed * 0.5); 
+            score = Math.max(0, score - 200);
+            scoreDisplay.innerText = `SCORE: ${score}`;
+        }
+
+        function renderStereo() {
+            // Update the stereo cameras based on main camera position/rotation
+            stereoCamera.update(camera);
+
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            // Render Left Eye (0 to width/2)
+            renderer.setScissor(0, 0, width / 2, height);
+            renderer.setViewport(0, 0, width / 2, height);
+            renderer.render(scene, stereoCamera.cameraL);
+
+            // Render Right Eye (width/2 to width)
+            renderer.setScissor(width / 2, 0, width / 2, height);
+            renderer.setViewport(width / 2, 0, width / 2, height);
+            renderer.render(scene, stereoCamera.cameraR);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // Run
+        init();
+
+    </script>
 </body>
 </html>
+
+
