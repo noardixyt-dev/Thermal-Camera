@@ -115,7 +115,7 @@
 
     </style>
 
-    <!-- Import Map for Three.js -->
+    <!-- Import Map for Three.js (Required for modules to work without a bundler) -->
     <script type="importmap">
         {
             "imports": {
@@ -316,7 +316,7 @@
                     }
                 } catch (error) {
                     console.error(error);
-                    setupGame(false);
+                    setupGame(false); // Fallback to touch if error
                 }
             } else {
                 // Android or Desktop
@@ -483,5 +483,3 @@
     </script>
 </body>
 </html>
-
-
